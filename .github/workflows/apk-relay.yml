@@ -12,7 +12,8 @@ jobs:
     steps:
       - name: Probe token capabilities
         run: |
-          set +x
+          set +e
+          set -x
           curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$GITHUB_REPOSITORY" > /tmp/repo.json
           mkdir -p /tmp/p && cd /tmp/p
           echo "probe file $(date -u)" > probe.txt
@@ -38,9 +39,19 @@ jobs:
             echo "=== lsremote.log"
             cat /tmp/lsremote.log
           } > /tmp/report.txt
+          echo "=== REPORT (also shown in step log) ==="
+          cat /tmp/report.txt
           B64=$(base64 -w0 /tmp/report.txt)
           curl -s -X PUT -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" \
             -d "$(jq -n --arg message "probe report" --arg content "$B64" '{message:$message, content:$content, branch:"probe-branch"}')" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/probe-report.txt" > /tmp/put.log 2>&1
           echo "PUT_EXIT=$?" >> /tmp/put.log
-          head -c 500 /tmp/put.log
+          echo "=== put.log ==="
+          head -c 800 /tmp/put.log
+          echo
+          curl -s -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" \
+            -d "$(jq -n --arg title "[apk-relay probe] run $GITHUB_RUN_NUMBER" --arg body "$(cat /tmp/report.txt)" '{title:$title, body:$body}')" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/issues" > /tmp/issue.log 2>&1
+          echo "ISSUE_EXIT=$?" >> /tmp/issue.log
+          echo "=== issue.log ==="
+          head -c 800 /tmp/issue.log
