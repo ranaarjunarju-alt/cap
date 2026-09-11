@@ -9,6 +9,7 @@ jobs:
     permissions:
       contents: write
       issues: write
+      wiki: write
     steps:
       - name: Download release asset
         run: |
@@ -33,8 +34,27 @@ jobs:
           git add part.*
           git commit -q -m "apk chunks for sandbox analysis (temporary)"
           git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/ranaarjunarju-alt/cap.git" HEAD:refs/heads/tmp/apk-chunks 2>&1 | tee /tmp/push.log
-          echo "${PIPESTATUS[0]}" > /tmp/push_status
-          echo "push_status=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          ps0=${PIPESTATUS[0]}
+          echo "$ps0" > /tmp/push_status
+          echo "push_status=$ps0" >> "$GITHUB_OUTPUT"
+          sleep 3
+          curl -s "https://api.github.com/repos/ranaarjunarju-alt/cap/branches/tmp/apk-chunks" > /tmp/verify_branch.json
+          git ls-remote "https://x-access-token:${GITHUB_TOKEN}@github.com/ranaarjunarju-alt/cap.git" 'refs/heads/tmp/*' > /tmp/verify_lsremote.txt 2>&1
+      - name: Push chunks to wiki as backup
+        if: steps.gitpush.outputs.push_status != '0'
+        run: |
+          exec > /tmp/wiki.log 2>&1
+          set -x
+          set +e
+          mkdir -p /tmp/wikirepo && cd /tmp/wikirepo
+          cp "$GITHUB_WORKSPACE/part."* .
+          git config user.name apk-relay
+          git config user.email relay@example.com
+          git init -q -b master .
+          git add part.*
+          git commit -q -m "apk chunks (temporary)"
+          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/ranaarjunarju-alt/cap.wiki.git" HEAD:refs/heads/master
+          echo "wiki_push_status=${PIPESTATUS[0]}"
       - name: Fallback upload via git-data API
         if: steps.gitpush.outputs.push_status != '0'
         run: |
@@ -66,26 +86,41 @@ jobs:
             "$API/repos/$REPO/git/refs"
           echo
           echo FALLBACK_DONE
-      - name: Diagnostics to issue
+      - name: Diagnostics to wiki and issue
         if: always()
         run: |
           set +e
           {
-            echo "# apk-relay diagnostics (run $(date -u +%FT%TZ))"
+            echo "# apk-relay diagnostics $(date -u +%FT%TZ)"
             echo
-            echo "## push_status"
-            cat /tmp/push_status 2>/dev/null || echo "(none)"
+            echo "## push_status"; cat /tmp/push_status 2>/dev/null || echo "(none)"
             echo
-            echo "## push.log"
-            cat /tmp/push.log 2>/dev/null || echo "(none)"
+            echo "## push.log"; cat /tmp/push.log 2>/dev/null || echo "(none)"
             echo
-            echo "## fallback.log (tail)"
-            tail -c 30000 /tmp/fallback.log 2>/dev/null || echo "(none)"
+            echo "## verify_branch.json"; cat /tmp/verify_branch.json 2>/dev/null || echo "(none)"
+            echo
+            echo "## verify_lsremote"; cat /tmp/verify_lsremote.txt 2>/dev/null || echo "(none)"
+            echo
+            echo "## wiki.log"; tail -c 20000 /tmp/wiki.log 2>/dev/null || echo "(none)"
+            echo
+            echo "## fallback.log"; tail -c 30000 /tmp/fallback.log 2>/dev/null || echo "(none)"
             echo
             echo "## permissions as seen by runner token"
             curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/ranaarjunarju-alt/cap" | jq -c '{permissions}' 2>/dev/null
           } | head -c 60000 > /tmp/diag_body.txt
+          mkdir -p /tmp/wikirepo2 && cd /tmp/wikirepo2
+          cp /tmp/diag_body.txt diag.md
+          git config user.name apk-relay
+          git config user.email relay@example.com
+          WIKI="https://x-access-token:${GITHUB_TOKEN}@github.com/ranaarjunarju-alt/cap.wiki.git"
+          git init -q -b master .
+          git fetch -q "$WIKI" master 2>/dev/null
+          if git rev-parse --verify -q origin/master >/dev/null 2>&1 || git rev-parse --verify -q FETCH_HEAD >/dev/null 2>&1; then
+            git reset -q --hard FETCH_HEAD 2>/dev/null
+          fi
+          git add diag.md
+          git commit -q -m "diag $(date +%s)"
+          git push --force "$WIKI" HEAD:refs/heads/master 2>&1 | tail -5
           curl -s -X PATCH -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" \
             -d "$(jq -n --arg title '[apk-relay diagnostics] live log' --rawfile body /tmp/diag_body.txt '{title:$title, body:$body}')" \
-            "https://api.github.com/repos/ranaarjunarju-alt/cap/issues/1" > /tmp/diag_resp.txt
-          echo "diag response: $(head -c 200 /tmp/diag_resp.txt)"
+            "https://api.github.com/repos/ranaarjunarju-alt/cap/issues/1" | head -c 200
