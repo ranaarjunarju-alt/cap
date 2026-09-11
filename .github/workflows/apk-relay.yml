@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      checks: write
+      issues: write
     steps:
       - name: Download release asset
         run: |
@@ -24,7 +24,6 @@ jobs:
       - name: Push chunks via git
         id: gitpush
         run: |
-          set -x
           set +e
           mkdir -p /tmp/chunks && cd /tmp/chunks
           cp "$GITHUB_WORKSPACE/part."* .
@@ -34,22 +33,25 @@ jobs:
           git add part.*
           git commit -q -m "apk chunks for sandbox analysis (temporary)"
           git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/ranaarjunarju-alt/cap.git" HEAD:refs/heads/tmp/apk-chunks 2>&1 | tee /tmp/push.log
+          echo "${PIPESTATUS[0]}" > /tmp/push_status
           echo "push_status=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
       - name: Fallback upload via git-data API
         if: steps.gitpush.outputs.push_status != '0'
         run: |
+          exec > /tmp/fallback.log 2>&1
           set -e
-          REPO=$GITHUB_REPOSITORY
+          set -x
+          REPO=ranaarjunarju-alt/cap
           AUTH="Authorization: token $GITHUB_TOKEN"
           API="https://api.github.com"
           cd /tmp/chunks
           entries=""
-          for f in part.*; do
+          for f in part.0 part.1 part.2 part.3; do
             echo "uploading blob $f ($(stat -c%s "$f") bytes)"
             resp=$(curl -s -X POST -H "$AUTH" -H "Content-Type: application/x-git-lfs-objects" -H "Content-Length: $(stat -c%s "$f")" --data-binary @"$f" "$API/repos/$REPO/git/blobs")
             sha=$(echo "$resp" | jq -r .sha)
+            echo "blob resp sha=$sha"
             [ "$sha" != "null" ] || { echo "BLOB UPLOAD FAILED: $resp"; exit 1; }
-            echo "blob: $sha"
             entries="$entries{\"path\":\"$f\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$sha\"},"
           done
           tree=$(echo "${entries%,}" | jq -c -s '{tree:.}')
@@ -63,13 +65,27 @@ jobs:
             -d "{\"ref\":\"refs/heads/tmp/apk-chunks\",\"sha\":\"$commit_sha\",\"force\":true}" \
             "$API/repos/$REPO/git/refs"
           echo
-      - name: Diagnostics check run
+          echo FALLBACK_DONE
+      - name: Diagnostics to issue
         if: always()
         run: |
           set +e
-          BODY=$( { echo "# apk-relay diagnostics"; echo; echo "## permissions as seen by runner token"; \
-            curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$GITHUB_REPOSITORY" | jq -c '{permissions}' 2>/dev/null; echo; \
-            echo "## git push output"; cat /tmp/push.log 2>/dev/null || echo "(no push log)"; } | head -c 40000 )
-          curl -s -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" \
-            -d "$(jq -n --arg name apk-relay-diag --arg status completed --arg conclusion neutral --arg summary "$BODY" '{name:$name,status:$status,conclusion:$conclusion,output:{summary:$summary}}')" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/check-runs" > /dev/null
+          {
+            echo "# apk-relay diagnostics (run $(date -u +%FT%TZ))"
+            echo
+            echo "## push_status"
+            cat /tmp/push_status 2>/dev/null || echo "(none)"
+            echo
+            echo "## push.log"
+            cat /tmp/push.log 2>/dev/null || echo "(none)"
+            echo
+            echo "## fallback.log (tail)"
+            tail -c 30000 /tmp/fallback.log 2>/dev/null || echo "(none)"
+            echo
+            echo "## permissions as seen by runner token"
+            curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/ranaarjunarju-alt/cap" | jq -c '{permissions}' 2>/dev/null
+          } | head -c 60000 > /tmp/diag_body.txt
+          curl -s -X PATCH -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" \
+            -d "$(jq -n --arg title '[apk-relay diagnostics] live log' --rawfile body /tmp/diag_body.txt '{title:$title, body:$body}')" \
+            "https://api.github.com/repos/ranaarjunarju-alt/cap/issues/1" > /tmp/diag_resp.txt
+          echo "diag response: $(head -c 200 /tmp/diag_resp.txt)"
