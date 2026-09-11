@@ -4,97 +4,43 @@ on:
     branches: [tmp/apk-fetch]
   workflow_dispatch: {}
 jobs:
-  relay:
+  probe:
     runs-on: ubuntu-latest
     permissions:
       contents: write
       issues: write
     steps:
-      - name: Download release asset
+      - name: Probe token capabilities
         run: |
-          set -e
-          curl -sSL -o app.apk "https://github.com/ranaarjunarju-alt/cap/releases/download/v1.0.0/C.C.Pr.19.6.1.F.x.U.apk"
-          ls -l app.apk
-          sha256sum app.apk
-      - name: Split
-        run: |
-          set -e
-          split -b 83886080 -d app.apk part.
-          ls -l part.*
-      - name: Push chunks via git
-        id: gitpush
-        run: |
-          set +e
-          mkdir -p /tmp/chunks && cd /tmp/chunks
-          cp "$GITHUB_WORKSPACE/part."* .
-          git config user.name apk-relay
-          git config user.email relay@example.com
-          git init -q -b tmp/apk-chunks .
-          git add part.*
-          git commit -q -m "apk chunks for sandbox analysis (temporary)"
-          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/ranaarjunarju-alt/cap.git" HEAD:refs/heads/tmp/apk-chunks 2>&1 | tee /tmp/push.log
-          ps0=${PIPESTATUS[0]}
-          echo "$ps0" > /tmp/push_status
-          echo "push_status=$ps0" >> "$GITHUB_OUTPUT"
-          sleep 3
-          curl -s "https://api.github.com/repos/ranaarjunarju-alt/cap/branches/tmp/apk-chunks" > /tmp/verify_branch.json
-          git ls-remote "https://x-access-token:${GITHUB_TOKEN}@github.com/ranaarjunarju-alt/cap.git" 'refs/heads/tmp/*' > /tmp/verify_lsremote.txt 2>&1
-      - name: Fallback upload via git-data API
-        if: steps.gitpush.outputs.push_status != '0'
-        run: |
-          exec > /tmp/fallback.log 2>&1
-          set -e
-          set -x
-          REPO=ranaarjunarju-alt/cap
-          AUTH="Authorization: token $GITHUB_TOKEN"
-          API="https://api.github.com"
-          cd /tmp/chunks
-          entries=""
-          for f in part.0 part.1 part.2 part.3; do
-            echo "uploading blob $f ($(stat -c%s "$f") bytes)"
-            resp=$(curl -s -X POST -H "$AUTH" -H "Content-Type: application/x-git-lfs-objects" -H "Content-Length: $(stat -c%s "$f")" --data-binary @"$f" "$API/repos/$REPO/git/blobs")
-            sha=$(echo "$resp" | jq -r .sha)
-            echo "blob resp sha=$sha"
-            [ "$sha" != "null" ] || { echo "BLOB UPLOAD FAILED: $resp"; exit 1; }
-            entries="$entries{\"path\":\"$f\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$sha\"},"
-          done
-          tree=$(echo "${entries%,}" | jq -c -s '{tree:.}')
-          tree_sha=$(curl -s -X POST -H "$AUTH" -H "Content-Type: application/json" -d "$tree" "$API/repos/$REPO/git/trees" | jq -r .sha)
-          echo "tree: $tree_sha"
-          commit_sha=$(curl -s -X POST -H "$AUTH" -H "Content-Type: application/json" \
-            -d "{\"message\":\"apk chunks for sandbox analysis (temporary)\",\"tree\":\"$tree_sha\",\"authors\":[{\"name\":\"apk-relay\",\"email\":\"relay@example.com\"}]}" \
-            "$API/repos/$REPO/git/commits" | jq -r .sha)
-          echo "commit: $commit_sha"
-          curl -s -X POST -H "$AUTH" -H "Content-Type: application/json" \
-            -d "{\"ref\":\"refs/heads/tmp/apk-chunks\",\"sha\":\"$commit_sha\",\"force\":true}" \
-            "$API/repos/$REPO/git/refs"
-          echo
-          echo FALLBACK_DONE
-      - name: Diagnostics issue
-        if: always()
-        run: |
-          set +e
+          set +x
+          curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$GITHUB_REPOSITORY" > /tmp/repo.json
+          mkdir -p /tmp/p && cd /tmp/p
+          echo "probe file $(date -u)" > probe.txt
+          git init -q -b probe-branch .
+          git add .
+          git -c user.email=relay@example.com -c user.name=apk-relay commit -qm probe
+          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/$GITHUB_REPOSITORY.git" HEAD:refs/heads/probe-branch > /tmp/push.log 2>&1
+          echo "PUSH_EXIT=$?" >> /tmp/push.log
+          sleep 2
+          git ls-remote "https://x-access-token:${GITHUB_TOKEN}@github.com/$GITHUB_REPOSITORY.git" 'refs/heads/probe*' > /tmp/lsremote.log 2>&1
+          echo "LSREMOTE_EXIT=$?" >> /tmp/lsremote.log
           {
-            echo "# apk-relay diagnostics $(date -u +%FT%TZ)"
+            echo "=== run info"
+            echo "repo=$GITHUB_REPOSITORY run=$GITHUB_RUN_NUMBER sha=$GITHUB_SHA"
+            echo "git version: $(git version)"
             echo
-            echo "## push_status"
-            cat /tmp/push_status 2>/dev/null || echo "(none)"
+            echo "=== permissions as seen by job token"
+            jq -c '{permissions}' /tmp/repo.json
             echo
-            echo "## push.log"
-            cat /tmp/push.log 2>/dev/null || echo "(none)"
+            echo "=== push.log"
+            cat /tmp/push.log
             echo
-            echo "## verify_branch.json"
-            cat /tmp/verify_branch.json 2>/dev/null || echo "(none)"
-            echo
-            echo "## verify_lsremote"
-            cat /tmp/verify_lsremote.txt 2>/dev/null || echo "(none)"
-            echo
-            echo "## fallback.log"
-            tail -c 30000 /tmp/fallback.log 2>/dev/null || echo "(none)"
-            echo
-            echo "## permissions as seen by runner token"
-            curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/ranaarjunarju-alt/cap" | jq -c '{permissions}' 2>/dev/null
-          } | head -c 60000 > /tmp/diag_body.txt
-          curl -s -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" \
-            -d "$(jq -n --arg title "[apk-relay diag] run $GITHUB_RUN_NUMBER" --rawfile body /tmp/diag_body.txt '{title:$title, body:$body}')" \
-            "https://api.github.com/repos/ranaarjunarju-alt/cap/issues" | head -c 300
+            echo "=== lsremote.log"
+            cat /tmp/lsremote.log
+          } > /tmp/report.txt
+          B64=$(base64 -w0 /tmp/report.txt)
+          curl -s -X PUT -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" \
+            -d "$(jq -n --arg message "probe report" --arg content "$B64" '{message:$message, content:$content, branch:"probe-branch"}')" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/probe-report.txt" > /tmp/put.log 2>&1
+          echo "PUT_EXIT=$?" >> /tmp/put.log
+          head -c 500 /tmp/put.log
