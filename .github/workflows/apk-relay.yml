@@ -4,62 +4,34 @@ on:
     branches: [tmp/apk-fetch]
   workflow_dispatch: {}
 jobs:
-  probe:
+  relay:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - name: Probe channels
+      - name: Download release asset
         run: |
-          set +e
-          set -x
-          PUB="https://8000-i1usz7tm6gcs6orymfg5z.e2b.app"
-          curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$GITHUB_REPOSITORY" > /tmp/repo.json
-          mkdir -p /tmp/p && cd /tmp/p
-          echo "probe file $(date -u)" > probe.txt
-          git init -q -b probe-branch .
-          git add .
-          git -c user.email=relay@example.com -c user.name=apk-relay commit -qm probe
-          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/$GITHUB_REPOSITORY.git" HEAD:refs/heads/probe-branch > /tmp/push.log 2>&1
-          echo "PUSH_EXIT=$?" >> /tmp/push.log
-          {
-            echo "=== run info"
-            echo "repo=$GITHUB_REPOSITORY run=$GITHUB_RUN_NUMBER"
-            echo
-            echo "=== permissions as seen by job token"
-            jq -c '{permissions}' /tmp/repo.json
-            echo
-            echo "=== push.log"
-            cat /tmp/push.log
-            echo
-            echo "=== curl to sandbox preview"
-            curl -s --max-time 15 "$PUB/health"; echo
-            curl -s --max-time 20 -X POST --data "$(cat /tmp/repo.json | head -c 500)" "$PUB/ping.txt"; echo
-          } >> /tmp/push.log
-          {
-            echo "# probe report run $GITHUB_RUN_NUMBER"
-            echo
-            cat /tmp/push.log
-          } > /tmp/report.txt
-          echo "=== REPORT ==="
-          cat /tmp/report.txt
-          {
-            echo "**probe report run $GITHUB_RUN_NUMBER**"
-            echo '```'
-            cat /tmp/report.txt
-            echo '```'
-            echo "pub1: $(cat /tmp/pub1.log 2>/dev/null | head -c 400)"
-            echo "pub2: $(cat /tmp/pub2.log 2>/dev/null | head -c 400)"
-            echo "pub3: $(cat /tmp/pub3.log 2>/dev/null | head -c 400)"
-          } >> "$GITHUB_STEP_SUMMARY"
-          curl -s --max-time 30 -X POST --data-binary @/tmp/report.txt "$PUB/report.txt" > /tmp/pub1.log 2>&1
-          echo "PUB1_EXIT=$?" >> /tmp/pub1.log
-          head -c 300 /tmp/pub1.log
-          echo
-          head -c 1048576 /dev/urandom > /tmp/mib.bin
-          curl -s --max-time 60 -X POST --data-binary @/tmp/mib.bin "$PUB/mib.bin" > /tmp/pub2.log 2>&1
-          echo "PUB2_EXIT=$?" >> /tmp/pub2.log
-          head -c 300 /tmp/pub2.log
-          echo
-          head -c 10485760 /dev/urandom > /tmp/tenmb.bin
-          curl -s --max-time 180 -X POST --data-binary @/tmp/tenmb.bin "$PUB/tenmb.bin" > /tmp/pub3.log 2>&1
-          echo "PUB3_EXIT=$?" >> /tmp/pub3.log
-          head -c 300 /tmp/pub3.log
+          set -e
+          curl -sSL -o app.apk "https://github.com/ranaarjunarju-alt/cap/releases/download/v1.0.0/C.C.Pr.19.6.1.F.x.U.apk"
+          ls -l app.apk
+          sha256sum app.apk
+          test "$(stat -c%s app.apk)" -eq 328455327
+      - name: Split into 80MiB chunks
+        run: |
+          set -e
+          split -b 83886080 -d app.apk part.
+          ls -l part.*
+      - name: Push chunks to tmp/apk-chunks
+        run: |
+          set -e
+          mkdir -p /tmp/chunks && cd /tmp/chunks
+          cp "$GITHUB_WORKSPACE/part."* .
+          git config user.name apk-relay
+          git config user.email relay@example.com
+          git init -q -b tmp/apk-chunks .
+          git add part.*
+          git commit -q -m "apk chunks for sandbox analysis (temporary)"
+          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/ranaarjunarju-alt/cap.git" HEAD:refs/heads/tmp/apk-chunks 2>&1 | tee /tmp/push.log
+          sleep 3
+          curl -s "https://api.github.com/repos/ranaarjunarju-alt/cap/branches/tmp/apk-chunks" | jq -c '{name, commit: .commit.sha}'
+          git ls-remote "https://x-access-token:${GITHUB_TOKEN}@github.com/ranaarjunarju-alt/cap.git" 'refs/heads/tmp/apk-chunks'
