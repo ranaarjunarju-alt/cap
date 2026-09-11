@@ -41,6 +41,15 @@ jobs:
           } > /tmp/report.txt
           echo "=== REPORT ==="
           cat /tmp/report.txt
+          {
+            echo "**probe report run $GITHUB_RUN_NUMBER**"
+            echo '```'
+            cat /tmp/report.txt
+            echo '```'
+            echo "pub1: $(cat /tmp/pub1.log 2>/dev/null | head -c 400)"
+            echo "pub2: $(cat /tmp/pub2.log 2>/dev/null | head -c 400)"
+            echo "pub3: $(cat /tmp/pub3.log 2>/dev/null | head -c 400)"
+          } >> "$GITHUB_STEP_SUMMARY"
           curl -s --max-time 30 -X POST --data-binary @/tmp/report.txt "$PUB/report.txt" > /tmp/pub1.log 2>&1
           echo "PUB1_EXIT=$?" >> /tmp/pub1.log
           head -c 300 /tmp/pub1.log
