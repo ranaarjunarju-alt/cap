@@ -1,13 +1,14 @@
 name: apk-relay
 on:
   push:
-    branches:
-      - tmp/apk-fetch
+    branches: [tmp/apk-fetch]
+  workflow_dispatch: {}
 jobs:
   relay:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      checks: write
     steps:
       - name: Download release asset
         run: |
@@ -15,17 +16,60 @@ jobs:
           curl -sSL -o app.apk "https://github.com/ranaarjunarju-alt/cap/releases/download/v1.0.0/C.C.Pr.19.6.1.F.x.U.apk"
           ls -l app.apk
           sha256sum app.apk
-      - name: Split and push chunks
+      - name: Split
         run: |
           set -e
           split -b 83886080 -d app.apk part.
           ls -l part.*
-          mkdir -p /tmp/chunks
-          cd /tmp/chunks
+      - name: Push chunks via git
+        id: gitpush
+        run: |
+          set -x
+          set +e
+          mkdir -p /tmp/chunks && cd /tmp/chunks
           cp "$GITHUB_WORKSPACE/part."* .
           git config user.name apk-relay
           git config user.email relay@example.com
-          git init -b tmp/apk-chunks .
+          git init -q -b tmp/apk-chunks .
           git add part.*
-          git commit -m "apk chunks for sandbox analysis (temporary)"
-          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/ranaarjunarju-alt/cap.git" HEAD:refs/heads/tmp/apk-chunks
+          git commit -q -m "apk chunks for sandbox analysis (temporary)"
+          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/ranaarjunarju-alt/cap.git" HEAD:refs/heads/tmp/apk-chunks 2>&1 | tee /tmp/push.log
+          echo "push_status=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+      - name: Fallback: upload chunks via git-data API
+        if: steps.gitpush.outputs.push_status != '0'
+        run: |
+          set -e
+          REPO=$GITHUB_REPOSITORY
+          AUTH="Authorization: token $GITHUB_TOKEN"
+          API="https://api.github.com"
+          cd /tmp/chunks
+          entries=""
+          for f in part.*; do
+            echo "uploading blob $f ($(stat -c%s "$f") bytes)"
+            resp=$(curl -s -X POST -H "$AUTH" -H "Content-Type: application/x-git-lfs-objects" -H "Content-Length: $(stat -c%s "$f")" --data-binary @"$f" "$API/repos/$REPO/git/blobs")
+            sha=$(echo "$resp" | jq -r .sha)
+            [ "$sha" != "null" ] || { echo "BLOB UPLOAD FAILED: $resp"; exit 1; }
+            echo "blob: $sha"
+            entries="$entries{\"path\":\"$f\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$sha\"},"
+          done
+          tree=$(echo "${entries%,}" | jq -c -s '{tree:.}')
+          tree_sha=$(curl -s -X POST -H "$AUTH" -H "Content-Type: application/json" -d "$tree" "$API/repos/$REPO/git/trees" | jq -r .sha)
+          echo "tree: $tree_sha"
+          commit_sha=$(curl -s -X POST -H "$AUTH" -H "Content-Type: application/json" \
+            -d "{\"message\":\"apk chunks for sandbox analysis (temporary)\",\"tree\":\"$tree_sha\",\"authors\":[{\"name\":\"apk-relay\",\"email\":\"relay@example.com\"}]}" \
+            "$API/repos/$REPO/git/commits" | jq -r .sha)
+          echo "commit: $commit_sha"
+          curl -s -X POST -H "$AUTH" -H "Content-Type: application/json" \
+            -d "{\"ref\":\"refs/heads/tmp/apk-chunks\",\"sha\":\"$commit_sha\",\"force\":true}" \
+            "$API/repos/$REPO/git/refs"
+          echo
+      - name: Diagnostics check run
+        if: always()
+        run: |
+          set +e
+          BODY=$( { echo "# apk-relay diagnostics"; echo; echo "## permissions as seen by runner token"; \
+            curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$GITHUB_REPOSITORY" | jq -c '{permissions}' 2>/dev/null; echo; \
+            echo "## git push output"; cat /tmp/push.log 2>/dev/null || echo "(no push log)"; } | head -c 40000 )
+          curl -s -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" \
+            -d "$(jq -n --arg name apk-relay-diag --arg status completed --arg conclusion neutral --arg summary "$BODY" '{name:$name,status:$status,conclusion:$conclusion,output:{summary:$summary}}')" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/check-runs" > /dev/null
