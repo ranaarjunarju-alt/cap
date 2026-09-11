@@ -35,7 +35,7 @@ jobs:
           git commit -q -m "apk chunks for sandbox analysis (temporary)"
           git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/ranaarjunarju-alt/cap.git" HEAD:refs/heads/tmp/apk-chunks 2>&1 | tee /tmp/push.log
           echo "push_status=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
-      - name: Fallback: upload chunks via git-data API
+      - name: Fallback upload via git-data API
         if: steps.gitpush.outputs.push_status != '0'
         run: |
           set -e
