@@ -1,0 +1,31 @@
+name: apk-relay
+on:
+  push:
+    branches:
+      - tmp/apk-fetch
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release asset
+        run: |
+          set -e
+          curl -sSL -o app.apk "https://github.com/ranaarjunarju-alt/cap/releases/download/v1.0.0/C.C.Pr.19.6.1.F.x.U.apk"
+          ls -l app.apk
+          sha256sum app.apk
+      - name: Split and push chunks
+        run: |
+          set -e
+          split -b 83886080 -d app.apk part.
+          ls -l part.*
+          mkdir -p /tmp/chunks
+          cd /tmp/chunks
+          cp "$GITHUB_WORKSPACE/part."* .
+          git config user.name apk-relay
+          git config user.email relay@example.com
+          git init -b tmp/apk-chunks .
+          git add part.*
+          git commit -m "apk chunks for sandbox analysis (temporary)"
+          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/ranaarjunarju-alt/cap.git" HEAD:refs/heads/tmp/apk-chunks
